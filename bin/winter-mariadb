@@ -1,0 +1,102 @@
+#!/bin/sh
+# Starts MariaDB for a Winter application: the component's command (MariaDb::component()).
+#
+# On the first start the data directory is initialised (mariadb-install-db); on every
+# start, before the server takes connections — in bootstrap mode, without one — root keeps
+# the socket only, and the application's user, its password and its database follow the
+# code. Then the script becomes the server (exec), so the stop signal reaches it directly.
+# The system's option files are not read (--no-defaults): Alpine's turns networking off,
+# and the server is what the service's parameters say, nothing else.
+#
+# Two accounts: root — this script's and an administrator's, through the socket, without a
+# password; and the application's user — no rights past its database, its password asked
+# for on every connection, over TCP only when a host is given.
+set -eu
+
+# What it says, one line each; a warning or an error says so first — the service's parser
+# reads it as that level.
+say() { printf 'winter-mariadb: %s\n' "$*" >&2; }
+fail() { say "ERROR: $*"; exit "${CODE:-1}"; }
+
+DATA= SOCKET= PORT= USER_NAME= DATABASE= CHARSET= COLLATION= TIMEZONE= HOST=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --data=*) DATA=${1#*=} ;;
+        --socket=*) SOCKET=${1#*=} ;;
+        --port=*) PORT=${1#*=} ;;
+        --user=*) USER_NAME=${1#*=} ;;
+        --database=*) DATABASE=${1#*=} ;;
+        --charset=*) CHARSET=${1#*=} ;;
+        --collation=*) COLLATION=${1#*=} ;;
+        --timezone=*) TIMEZONE=${1#*=} ;;
+        --host=*) HOST=${1#*=} ;;
+        --) shift; break ;;
+        *) CODE=2 fail "unknown option $1" ;;
+    esac
+    shift
+done
+PASSWORD=${WINTER_MARIADB_PASSWORD:-}
+unset WINTER_MARIADB_PASSWORD
+
+command -v mariadbd >/dev/null 2>&1 || fail "MariaDB is not installed: no mariadbd. Add it to the image: call service docker"
+mkdir -p "$SOCKET"
+
+# The server's time zone is the process's: NOW() and the log follow it.
+export TZ="$TIMEZONE"
+
+if [ ! -d "$DATA/mysql" ]; then
+    if [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
+        fail "$DATA holds files but no MariaDB data: it is not initialised over them."
+    fi
+    mkdir -p "$DATA"
+    chmod 700 "$DATA"
+    # root without a password: the socket only, see below.
+    out=$(mariadb-install-db --no-defaults --datadir="$DATA" --auth-root-authentication-method=normal \
+        --skip-test-db --skip-name-resolve 2>&1) || fail "mariadb-install-db failed for $DATA: $out"
+    say "initialised MariaDB $(mariadbd --version | sed 's/.*Ver \([0-9.]*\).*/\1/') data in $DATA."
+fi
+
+# SQL literals: a quote and a backslash are doubled or escaped, nothing else is special.
+quote() { printf "'%s'" "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/''/g")"; }
+account() { printf "%s@%s" "$(quote "$USER_NAME")" "$(quote "$1")"; }
+password() { if [ -n "$PASSWORD" ]; then printf 'IDENTIFIED BY %s' "$(quote "$PASSWORD")"; else printf "IDENTIFIED BY ''"; fi; }
+
+new_database=yes
+[ -d "$DATA/$DATABASE" ] && new_database=no
+collate=
+[ -n "$COLLATION" ] && collate=" COLLATE $COLLATION"
+# Run before the server takes connections; piped, so the password is never on disk.
+statements() {
+    echo "FLUSH PRIVILEGES;"
+    # mariadb-install-db makes root for 127.0.0.1, ::1 and the host name too, without a
+    # password: over TCP that is anyone's way in. root keeps the socket.
+    echo "DELETE FROM mysql.global_priv WHERE User = 'root' AND Host <> 'localhost';"
+    echo "DELETE FROM mysql.proxies_priv WHERE Host <> 'localhost';"
+    echo "FLUSH PRIVILEGES;"
+    echo "CREATE DATABASE IF NOT EXISTS \`$DATABASE\` CHARACTER SET $CHARSET$collate;"
+    for host in localhost %; do
+        if [ "$host" = % ] && [ -z "$HOST" ]; then
+            echo "DROP USER IF EXISTS $(account %);"
+            continue
+        fi
+        echo "CREATE USER IF NOT EXISTS $(account "$host");"
+        echo "ALTER USER $(account "$host") $(password);"
+        echo "GRANT ALL PRIVILEGES ON \`$DATABASE\`.* TO $(account "$host");"
+    done
+}
+out=$(statements | mariadbd --no-defaults --bootstrap --datadir="$DATA" --skip-name-resolve 2>&1) \
+    || fail "$(printf '%s\n' "$out" | grep -E 'ERROR' | head -1)"
+if [ "$new_database" = yes ]; then
+    say "created database $DATABASE for $USER_NAME."
+fi
+
+if [ -n "$HOST" ]; then
+    network="--bind-address=$HOST"
+else
+    network="--skip-networking"
+fi
+collation=
+[ -n "$COLLATION" ] && collation="--collation-server=$COLLATION"
+# shellcheck disable=SC2086 — $collation is one word or none
+exec mariadbd --no-defaults --datadir="$DATA" --socket="$SOCKET/mysqld.sock" --pid-file="$SOCKET/mysqld.pid" \
+    --port="$PORT" $network --skip-name-resolve --character-set-server="$CHARSET" $collation "$@"

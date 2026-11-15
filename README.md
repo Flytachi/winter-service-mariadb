@@ -176,32 +176,78 @@ database.
 
 ## Connecting
 
-```php
-$db = new MariaDb(database: 'app', password: env('DB_PASSWORD'));
+The `MariaDb` object knows where its server is:
 
-$pdo = new PDO($db->dsn(), $db->user, $db->password);
-// mysql:unix_socket=/run/mysqld/mysqld.sock;dbname=app;charset=utf8mb4
+```php
+$db->dsn();          // mysql:unix_socket=/run/mysqld/mysqld.sock;dbname=app;charset=utf8mb4
+$db->socketPath();   // /run/mysqld/mysqld.sock
+$db->user;           // winter
+$db->database;       // app — without database: winter, the user's name
 ```
 
-### With winter-ppa
+Keep how the server runs and how the code connects in **one place** — one method both
+the application and the connecting code call.
 
-The configuration winter-ppa connects with runs the server too: the socket, the database
-and the user cannot drift apart. PDO's MySQL driver takes a socket as `unix_socket`, not
-as a host — the configuration gives the service's DSN:
+### With PDO
 
 ```php
-namespace Main\Configs;
+namespace Main;
 
-use Flytachi\Winter\Cdo\Config\MySqlDbConfig;
 use Flytachi\Winter\Service\MariaDb\MariaDb;
 
-class MainDbConfig extends MySqlDbConfig
+final class Db
 {
     public static function service(): MariaDb
     {
         return new MariaDb(database: 'app', password: env('DB_PASSWORD'));
     }
 
+    public static function connect(): \PDO
+    {
+        $db = self::service();
+        return new \PDO($db->dsn(), $db->user, $db->password, [
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+        ]);
+    }
+}
+```
+
+```php
+// bootstrap.php
+$components->service(Db::service());
+
+// anywhere
+$rows = Db::connect()->query('SELECT id, text FROM records')->fetchAll();
+```
+
+### With winter-ppa
+
+The database configuration winter-ppa connects with runs the server too: the socket, the
+database and the user cannot drift apart. PDO's MySQL driver takes a socket as
+`unix_socket`, not as a host — so the configuration gives the service's DSN:
+
+```php
+namespace Main\Configs;
+
+use Flytachi\Winter\Cdo\Config\MySqlDbConfig;
+use Flytachi\Winter\Ppa\Pool\PpaPoolConfigInterface;
+use Flytachi\Winter\Ppa\Pool\PpaPoolTrait;
+use Flytachi\Winter\Service\MariaDb\MariaDb;
+
+class MainDbConfig extends MySqlDbConfig implements PpaPoolConfigInterface
+{
+    use PpaPoolTrait;
+
+    public int $poolMaxConnections = 10;
+    public float $poolWaitTimeout = 5.0;
+
+    /** What the application runs. */
+    public static function service(): MariaDb
+    {
+        return new MariaDb(database: 'app', password: env('DB_PASSWORD'));
+    }
+
+    /** How winter-ppa connects to it. */
     public function setUp(): void
     {
         $db = self::service();
@@ -210,6 +256,7 @@ class MainDbConfig extends MySqlDbConfig
         $this->password = $db->password ?? '';
     }
 
+    /** Through the socket: PDO's MySQL driver takes it as unix_socket. */
     public function getDns(): string
     {
         return self::service()->dsn();
@@ -221,6 +268,21 @@ class MainDbConfig extends MySqlDbConfig
 // bootstrap.php
 $components->service(MainDbConfig::service());
 ```
+
+Repositories point at it as at any database configuration:
+
+```php
+class RecordRepository extends Repository
+{
+    protected string $dbConfigClassName = MainDbConfig::class;
+    protected string $entityClassName = Record::class;
+    public static string $table = 'records';
+}
+```
+
+Over TCP (`host` set, another container connecting) `getDns()` is not overridden;
+`setUp()` sets `host` — `127.0.0.1` or the container's name — and `port`, and the password
+is mandatory.
 
 ### How many connections
 

@@ -27,7 +27,7 @@ final class MariaDbTest extends TestCase
         self::assertSame(30.0, $component->grace);
         self::assertSame(SIGTERM, $component->stopSignal, 'a normal shutdown');
         self::assertSame(
-            ['mariadb-admin', '--socket=/run/mysqld/mysqld.sock', '--user=root', 'ping', '--silent'],
+            ['mariadb-admin', '--socket=/run/mysqld/mysqld.sock', '--user=healthcheck', 'ping', '--silent'],
             $component->ready,
         );
         self::assertSame($component->ready, $component->alive?->command);
@@ -134,6 +134,7 @@ final class MariaDbTest extends TestCase
         yield 'a host without a password' => [static fn() => new MariaDb(host: '0.0.0.0'), 'a host needs a password'];
         yield 'a password on two lines' => [static fn() => new MariaDb(password: "a\nb"), 'the password is one line'];
         yield 'root as the application' => [static fn() => new MariaDb(user: 'root'), "user \"root\" is the server's own account"];
+        yield 'the check\'s account as the application' => [static fn() => new MariaDb(user: 'healthcheck'), "user \"healthcheck\" is the server's own account"];
         yield 'a user of other letters' => [static fn() => new MariaDb(user: 'app-1'), 'user must be letters, digits and _'];
         yield 'the server\'s database' => [static fn() => new MariaDb(database: 'mysql'), "database \"mysql\" is the server's own"];
         yield 'a database of other letters' => [static fn() => new MariaDb(database: 'shop;drop'), 'database must be letters, digits and _'];

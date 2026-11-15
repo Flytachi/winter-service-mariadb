@@ -8,9 +8,13 @@
 # The system's option files are not read (--no-defaults): Alpine's turns networking off,
 # and the server is what the service's parameters say, nothing else.
 #
-# Two accounts: root — this script's and an administrator's, through the socket, without a
-# password; and the application's user — no rights past its database, its password asked
-# for on every connection, over TCP only when a host is given.
+# Three accounts: root — an administrator's, through the socket, for the system's root only
+# (unix_socket: `docker compose exec -u root server mariadb --socket=/run/mysqld/mysqld.sock -u root`); healthcheck — the
+# readiness check's, no rights at all; and the application's user — no rights past its
+# database, its password asked for on every connection, over TCP only when a host is given.
+# A connection that names no user — a configuration that forgot it, its user being root —
+# is refused, not let in as root. This script needs none of them: bootstrap mode has no
+# connections.
 set -eu
 
 # What it says, one line each; a warning or an error says so first — the service's parser
@@ -50,7 +54,7 @@ if [ ! -d "$DATA/mysql" ]; then
     fi
     mkdir -p "$DATA"
     chmod 700 "$DATA"
-    # root without a password: the socket only, see below.
+    # root with no password for now: below, it becomes the system root's only.
     out=$(mariadb-install-db --no-defaults --datadir="$DATA" --auth-root-authentication-method=normal \
         --skip-test-db --skip-name-resolve 2>&1) || fail "mariadb-install-db failed for $DATA: $out"
     say "initialised MariaDB $(mariadbd --version | sed 's/.*Ver \([0-9.]*\).*/\1/') data in $DATA."
@@ -73,6 +77,13 @@ statements() {
     echo "DELETE FROM mysql.global_priv WHERE User = 'root' AND Host <> 'localhost';"
     echo "DELETE FROM mysql.proxies_priv WHERE Host <> 'localhost';"
     echo "FLUSH PRIVILEGES;"
+    # root through the socket for the system's root only: winter — the application, and
+    # whatever runs as it — is not root here.
+    echo "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;"
+    # The readiness check signs in as an account with no rights: it answers a ping, and
+    # sees no data.
+    echo "CREATE USER IF NOT EXISTS 'healthcheck'@'localhost';"
+    echo "ALTER USER 'healthcheck'@'localhost' IDENTIFIED BY '';"
     echo "CREATE DATABASE IF NOT EXISTS \`$DATABASE\` CHARACTER SET $CHARSET$collate;"
     for host in localhost %; do
         if [ "$host" = % ] && [ -z "$HOST" ]; then

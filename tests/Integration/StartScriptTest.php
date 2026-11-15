@@ -8,7 +8,8 @@ namespace Flytachi\Winter\Service\MariaDb\Tests\Integration;
  * The start script against a real server: a first start initialises the data, a later
  * one keeps it; a directory of something else is refused; the application's user, its
  * password and its database follow the code on every start; the user has no rights past
- * its database; root keeps the socket; over TCP only the user is let in, with its password.
+ * its database; root is the system's root's only, the check's account sees nothing; over
+ * TCP only the user is let in, with its password.
  */
 final class StartScriptTest extends ServerCase
 {
@@ -116,7 +117,43 @@ final class StartScriptTest extends ServerCase
                 self::assertStringContainsString('Access denied', $e->getMessage(), $user);
             }
         }
-        self::assertSame('root@localhost', $this->root($db)->query('SELECT CURRENT_USER()')->fetchColumn(), 'root keeps the socket');
+    }
+
+    public function test_root_is_the_systems_root_only_and_a_forgotten_user_is_refused(): void
+    {
+        $db = $this->mariadb(password: 'pw');
+        self::assertTrue($this->start($db), $this->serverOutput());
+
+        foreach (['root', 'winter'] as $user) {
+            try {
+                $this->bare($db, $user);
+                self::fail("{$user} got in through the socket without a password");
+            } catch (\PDOException $e) {
+                self::assertStringContainsString('Access denied', $e->getMessage(), $user);
+            }
+        }
+        self::assertSame(['localhost unix_socket'], $this->bootstrapQuery(
+            $db,
+            "SELECT CONCAT(Host, ' ', JSON_VALUE(Priv, '$.plugin')) FROM mysql.global_priv WHERE User = 'root'",
+        ), 'root: the socket, for the system root');
+    }
+
+    public function test_the_checks_account_sees_no_data(): void
+    {
+        $db = $this->mariadb(password: 'pw', database: 'shop');
+        self::assertTrue($this->start($db), $this->serverOutput());
+        $this->app($db)->exec('CREATE TABLE secrets (v TEXT)');
+
+        $check = $this->bare($db, 'healthcheck');
+        foreach (['SELECT * FROM shop.secrets', 'SELECT * FROM mysql.user', 'CREATE DATABASE x'] as $sql) {
+            try {
+                $check->query($sql);
+                self::fail("healthcheck may: {$sql}");
+            } catch (\PDOException $e) {
+                self::assertMatchesRegularExpression('/denied/i', $e->getMessage(), $sql);
+            }
+        }
+        self::assertStringNotContainsString('Access denied', $this->serverOutput(), 'the checks log no refused login');
     }
 
     public function test_without_a_host_the_tcp_account_goes(): void
@@ -128,9 +165,8 @@ final class StartScriptTest extends ServerCase
         $db = $this->mariadb(password: 'pw');
         self::assertTrue($this->start($db), $this->serverOutput());
 
-        $hosts = $this->root($db)->query("SELECT Host FROM mysql.global_priv WHERE User = 'winter' ORDER BY Host")->fetchAll(\PDO::FETCH_COLUMN);
-        self::assertSame(['localhost'], $hosts);
-        self::assertSame(['localhost'], $this->root($db)->query("SELECT Host FROM mysql.global_priv WHERE User = 'root'")->fetchAll(\PDO::FETCH_COLUMN));
+        self::assertSame(['localhost'], $this->bootstrapQuery($db, "SELECT Host FROM mysql.global_priv WHERE User = 'winter'"));
+        self::assertSame(['localhost'], $this->bootstrapQuery($db, "SELECT Host FROM mysql.global_priv WHERE User = 'root'"));
     }
 
     public function test_the_time_zone_reaches_the_server(): void
@@ -147,7 +183,7 @@ final class StartScriptTest extends ServerCase
         $db = $this->mariadb(settings: ['max_connections' => 42, 'performance_schema' => false]);
         self::assertTrue($this->start($db), $this->serverOutput());
 
-        $pdo = $this->root($db);
+        $pdo = $this->app($db);
         self::assertSame('42', (string) $pdo->query('SELECT @@max_connections')->fetchColumn());
         self::assertSame('0', (string) $pdo->query('SELECT @@performance_schema')->fetchColumn());
     }

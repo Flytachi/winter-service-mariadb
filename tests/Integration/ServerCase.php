@@ -116,10 +116,32 @@ abstract class ServerCase extends TestCase
         return new \PDO($db->dsn(), $db->user, $password ?? $db->password, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
     }
 
-    /** root, through the socket: what the start script and an administrator use. */
-    protected function root(MariaDb $db): \PDO
+    /** An account through the socket, without a password. */
+    protected function bare(MariaDb $db, string $user): \PDO
     {
-        return new \PDO("mysql:unix_socket={$db->socketPath()}", MariaDb::SUPERUSER, '', [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        return new \PDO("mysql:unix_socket={$db->socketPath()}", $user, '', [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+    }
+
+    /**
+     * What a query reads from the stopped server's data, in bootstrap mode — as the start
+     * script works: the accounts' own tables, which only root sees, and root is the
+     * system's here.
+     *
+     * @return list<string>
+     */
+    protected function bootstrapQuery(MariaDb $db, string $sql): array
+    {
+        $this->stop();
+        $file = $this->dir . '/query-' . bin2hex(random_bytes(4)) . '.txt';
+        $statement = sprintf("%s INTO OUTFILE '%s';", rtrim($sql, ';'), $file);
+        exec(sprintf(
+            'echo %s | mariadbd --no-defaults --bootstrap --datadir=%s 2>&1',
+            escapeshellarg($statement),
+            escapeshellarg($db->data),
+        ), $output, $code);
+        self::assertSame(0, $code, implode("\n", $output));
+        $rows = (string) @file_get_contents($file);
+        return $rows === '' ? [] : explode("\n", rtrim($rows, "\n"));
     }
 
     protected function tcp(MariaDb $db, string $user, string $password): \PDO

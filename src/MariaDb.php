@@ -27,10 +27,11 @@ use Flytachi\Winter\Kernel\App\ServiceImage;
  * code. By default the server listens on its Unix socket only: nothing outside the
  * container reaches it.
  *
- * Two accounts: `root`, for the start script and an administrator, through the socket
- * only, without a password; and the application's (`$user`) — all rights on its database,
- * none past it. An SQL injection through the application's connection reaches that
- * database's data, not the others, nor the accounts.
+ * Three accounts: `root`, an administrator's, through the socket for the system's root
+ * only (`unix_socket`); `healthcheck`, the readiness check's, with no rights; and the
+ * application's (`$user`) — all rights on its database, none past it. An SQL injection
+ * through the application's connection reaches that database's data, not the others, nor
+ * the accounts; a configuration that forgot its user is refused, not let in as root.
  *
  * @link https://winterframe.net/docs/services Services inside the application
  */
@@ -39,14 +40,17 @@ final readonly class MariaDb implements Service
     /** The variable the password reaches the start script in — never the command line. */
     public const string PASSWORD_VARIABLE = 'WINTER_MARIADB_PASSWORD';
 
-    /** The account the start script and an administrator use: through the socket only. */
+    /** The administrator's account: through the socket, for the system's root only. */
     public const string SUPERUSER = 'root';
+
+    /** The readiness check's account: no rights, no password, the socket only. */
+    public const string HEALTHCHECK = 'healthcheck';
 
     /** The name of the socket file in the socket directory. */
     public const string SOCKET_FILE = 'mysqld.sock';
 
     /** The accounts a server has of its own: not one to hand to the application. */
-    private const array SYSTEM_USERS = ['root', 'mariadb.sys', 'mysql', 'PUBLIC'];
+    private const array SYSTEM_USERS = ['root', 'healthcheck', 'mariadb.sys', 'mysql', 'PUBLIC'];
 
     /** The databases a server has of its own. */
     private const array SYSTEM_DATABASES = ['mysql', 'information_schema', 'performance_schema', 'sys'];
@@ -259,14 +263,14 @@ final readonly class MariaDb implements Service
     }
 
     /**
-     * `mariadb-admin ping` as root through the socket: 0 once it answers. root needs no
-     * password there, so a check never logs a refused login.
+     * `mariadb-admin ping` through the socket as {@see HEALTHCHECK}: 0 once it answers. That
+     * account signs in without a password, so a check never logs a refused login.
      *
      * @return list<string>
      */
     public function isReady(): array
     {
-        return ['mariadb-admin', '--socket=' . $this->socketPath(), '--user=' . self::SUPERUSER, 'ping', '--silent'];
+        return ['mariadb-admin', '--socket=' . $this->socketPath(), '--user=' . self::HEALTHCHECK, 'ping', '--silent'];
     }
 
     private function aliveProbe(): ?Probe

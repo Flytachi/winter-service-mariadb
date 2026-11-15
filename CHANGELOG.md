@@ -4,6 +4,18 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — unreleased
+
+### Security
+
+- `root` signs in through the socket for the system's root only (`unix_socket`), no
+  longer without a password for anyone: a configuration that forgot its user —
+  `MySqlDbConfig`'s is `root` by default — was let in with every right, and is now
+  refused. Data made by 1.0.0 is moved on at its next start. An administrator:
+  `docker compose exec -u root server mariadb --socket=/run/mysqld/mysqld.sock -u root`.
+- The readiness and alive checks sign in as `healthcheck`, an account with no rights,
+  made on every start; `healthcheck` is refused as the application's `user`.
+
 ## [1.0.0] — 2026-11-15
 
 ### Added

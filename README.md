@@ -121,7 +121,7 @@ what these parameters say. Alpine's own turns networking off.
 | `retries` | `3` | Restarts after a crash within 30 minutes |
 | `grace` | `30.0` | Seconds to stop before SIGKILL |
 | `startTimeout` | `60` | Seconds to become ready; a first start initialises the data |
-| `alive` | `true` | `true`: `mariadb-admin ping` every 10 s, 5 s for an answer, 6 misses in a row mean it hangs. A `Probe` of your own. `null` or `false`: not checked |
+| `alive` | `true` | `true`: `mariadb-admin ping` as `healthcheck` every 10 s, 5 s for an answer, 6 misses in a row mean it hangs. A `Probe` of your own. `null` or `false`: not checked |
 
 Every value is checked when the object is made — a relative path, a port out of range, a
 host without a password, a name not of letters, digits and `_`, `user: 'root'`,
@@ -137,8 +137,9 @@ saying what is wrong.
 2. With no data yet, runs `mariadb-install-db`. A directory that holds files but no
    MariaDB data is refused, not initialised over.
 3. Before the server takes connections — in bootstrap mode, without one:
-   - `root` keeps the socket: the passwordless `root` accounts `mariadb-install-db` makes
-     for `127.0.0.1`, `::1` and the host name go;
+   - `root` keeps the socket, for the system's root only (`unix_socket`): the passwordless
+     `root` accounts `mariadb-install-db` makes for `127.0.0.1`, `::1` and the host name go;
+   - `healthcheck`, the readiness check's account, is there — with no rights;
    - creates the database when it is missing, and says so;
    - creates the application's account when it is missing, sets its password, grants it
      its database; with a host, the same for TCP (`'user'@'%'`), and without one that
@@ -152,16 +153,20 @@ it is on no command line and never on disk.
 
 ## Accounts
 
-| Account | Where from | Password | Rights |
+| Account | Where from | How it signs in | Rights |
 | --- | --- | --- | --- |
-| `root` | the socket only | none | everything: the start script and an administrator |
+| `root` | the socket only | as the system's root (`unix_socket`) | everything: an administrator |
+| `healthcheck` | the socket only | without a password | none: the readiness check |
 | `user` | the socket; TCP with a host | `password` | all on its database, nothing past it |
 
-An administrator, inside the container:
+An administrator, inside the container, as the system's root:
 
 ```bash
-docker compose exec server mariadb --socket=/run/mysqld/mysqld.sock -u root
+docker compose exec -u root server mariadb --socket=/run/mysqld/mysqld.sock -u root
 ```
+
+The application runs as `winter`, so it is never `root` here: a configuration that forgot
+its user — `MySqlDbConfig`'s is `root` by default — gets `Access denied`, not every right.
 
 The application's account cannot create databases or accounts, read `mysql.user`, grant
 rights or change global variables: an SQL injection through its connection stays in its
